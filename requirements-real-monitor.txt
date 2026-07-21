@@ -1,0 +1,26 @@
+-r requirements.txt
+
+# Real WeChat popup detection and OCR dependencies.
+pywin32>=306
+psutil>=5.9
+Pillow>=10.0
+numpy==1.26.4
+opencv-python==4.6.0.66
+opencv-contrib-python==4.6.0.66
+opencv-python-headless==4.6.0.66
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+
+# Optional tray icon support planned for the next iteration.
+pystray>=0.19
+
+# Automation notification by mouse/keyboard simulation.
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+
+# Alarm audio playback for mp3/ogg/wav/flac.
+pygame>=2.6
+
+# Modern desktop UI. 0.24.1 includes the Windows desktop client in the wheel;
+# newer Flet versions download it on first launch, which is unreliable here.
+flet==0.24.1

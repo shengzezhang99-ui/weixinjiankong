@@ -1,0 +1,70 @@
+{
+  "app": {
+    "poll_interval_ms": 300,
+    "alarm_sound": "preset:reflection",
+    "escalation_minutes": 3,
+    "keep_awake_enabled": true,
+    "keep_awake_interval_seconds": 240,
+    "keep_awake_simulate_input": true,
+    "keep_awake_mouse_nudge": true,
+    "debug_save_screenshots": false,
+    "log_ocr_text": true,
+    "cleanup_screenshots_keep": 80,
+    "enable_tray": false,
+    "cross_source_dedup_seconds": 12
+  },
+  "wechat": {
+    "process_name": "WeChat.exe",
+    "enable_popup_ocr": false,
+    "min_width": 180,
+    "max_width": 520,
+    "min_height": 80,
+    "max_height": 260
+  },
+  "auto_window_ocr": {
+    "enabled": true,
+    "poll_interval_seconds": 3,
+    "process_names": ["Weixin.exe", "WeChat.exe"],
+    "selected_window_hwnd": 0,
+    "selected_window_title": "",
+    "window_class_names": ["WeChatMainWndForPC", "mmui::MainWindow", "Qt51514QWindowIcon"],
+    "window_title_keywords": ["微信", "WeChat"],
+    "min_width": 500,
+    "min_height": 500,
+    "crop_left": 300,
+    "crop_top": 80,
+    "crop_right": 20,
+    "crop_bottom": 160,
+    "require_chat_match": false,
+    "max_recent_lines": 12,
+    "dedup_seconds": 180,
+    "dedup_similarity": 0.88,
+    "skip_existing_on_start": true
+  },
+  "region": {
+    "enabled": false,
+    "poll_interval_seconds": 30,
+    "bbox": [],
+    "require_chat_match": false,
+    "max_recent_lines": 12,
+    "dedup_seconds": 180,
+    "dedup_similarity": 0.88,
+    "skip_existing_on_start": true
+  },
+  "rules": {
+    "monitored_chats": ["运维值班群"],
+    "my_names": ["@张三"],
+    "keywords": ["报警", "宕机", "P0", "紧急"],
+    "fuzzy_chat_threshold": 0.85,
+    "fuzzy_name_threshold": 0.88,
+    "allow_keyword_without_chat": false
+  },
+  "notification": {
+    "contact_name": "联系人",
+    "retry_attempts": 2,
+    "retry_delay_seconds": 60,
+    "automation_input_pos": [],
+    "automation_press_enter": false,
+    "automation_message_template": "微信强提醒未处理，请电话提醒我。\n群：{chat_name}\n内容：{content}\n时间：{time}"
+  }
+}

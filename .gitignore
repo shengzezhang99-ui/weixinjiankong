@@ -1,0 +1,17 @@
+.venv*/
+__pycache__/
+*.py[cod]
+
+config.json
+logs/
+screenshots_debug/
+@AutomationLog.txt
+
+.pytest_cache/
+.coverage
+dist/
+build/
+*.spec
+
+# Unrelated presentation workspace kept beside this project.
+新建文件夹/
