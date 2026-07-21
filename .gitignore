@@ -11,7 +11,6 @@ screenshots_debug/
 .coverage
 dist/
 build/
-*.spec
 
 # Unrelated presentation workspace kept beside this project.
 新建文件夹/

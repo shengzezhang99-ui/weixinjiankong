@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+from .assets import resolve_ocr_model_dirs
 from .config import Config
 from .dedup import CrossSourceAlertDeduplicator, OcrLineDeduplicator
 from .housekeeping import cleanup_screenshots
@@ -82,7 +83,16 @@ class OcrEngine:
             try:
                 from paddleocr import PaddleOCR
 
-                self._ocr = PaddleOCR(use_angle_cls=True, lang="ch", enable_mkldnn=False, show_log=False)
+                model_dirs = resolve_ocr_model_dirs()
+                if model_dirs:
+                    self.logger.info("PaddleOCR using bundled models: %s", model_dirs)
+                self._ocr = PaddleOCR(
+                    use_angle_cls=True,
+                    lang="ch",
+                    enable_mkldnn=False,
+                    show_log=False,
+                    **model_dirs,
+                )
                 self._available = True
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("PaddleOCR 不可用：%s", exc)
