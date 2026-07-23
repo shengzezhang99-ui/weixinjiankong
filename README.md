@@ -73,7 +73,7 @@ $env:PYTHONUTF8='1'
 - `keep_awake_interval_seconds`：保活刷新间隔，默认 `240` 秒。
 - `keep_awake_simulate_input`：是否发送无感 F15 按键刷新系统空闲时间，默认开启。
 - `keep_awake_mouse_nudge`：是否用鼠标 1 像素往返作为兜底保活，默认开启。
-- `alarm_sound`：报警音。可使用 `audio/` 中的预设，如 `preset:reflection`、`preset:surge`、`preset:dreamer`，也可保存导入音频文件路径。
+- `alarm_sound`：报警音。可使用 `audio/` 中的预设，如 `preset:reflection`、`preset:surge`、`preset:dreamer`、`preset:huawei`，也可保存导入音频文件路径。
 - `retry_attempts`：通知失败后最多再试次数，默认 `2`。
 - `retry_delay_seconds`：通知失败后等待多久再试，默认 `60` 秒。
 

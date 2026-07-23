@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 import time
@@ -14,6 +15,7 @@ class AlarmPlayer:
         self.logger = logger
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        atexit.register(self.stop)
 
     def start(self, sound_path: str = "") -> None:
         self.stop()
@@ -23,10 +25,13 @@ class AlarmPlayer:
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_pygame()
         self._stop_winsound()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1)
-        self._thread = None
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)
+        if self._thread is thread:
+            self._thread = None
 
     def _run(self, sound_path: str) -> None:
         path = resolve_alarm_sound(sound_path)
@@ -47,20 +52,15 @@ class AlarmPlayer:
             pygame.mixer.init()
             pygame.mixer.music.load(str(path))
             pygame.mixer.music.play(loops=-1)
-            while not self._stop.is_set():
-                time.sleep(0.2)
-            pygame.mixer.music.stop()
-            pygame.mixer.quit()
+            try:
+                while not self._stop.is_set():
+                    time.sleep(0.2)
+            finally:
+                self._stop_pygame()
             return True
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("pygame 播放报警音失败，尝试回退：%s", exc)
-            try:
-                import pygame
-
-                if pygame.mixer.get_init():
-                    pygame.mixer.quit()
-            except Exception:
-                pass
+            self._stop_pygame()
             return False
 
     def _play_wav_with_winsound(self, path: Path) -> bool:
@@ -82,5 +82,18 @@ class AlarmPlayer:
     def _stop_winsound() -> None:
         try:
             winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _stop_pygame() -> None:
+        try:
+            import pygame
+
+            if pygame.mixer.get_init():
+                try:
+                    pygame.mixer.music.stop()
+                finally:
+                    pygame.mixer.quit()
         except Exception:
             pass

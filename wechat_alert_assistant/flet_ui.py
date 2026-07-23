@@ -19,9 +19,10 @@ from .housekeeping import cleanup_runtime_files
 from .keepalive import KeepAliveController
 from .logging_setup import setup_logging
 from .models import Alert, Message
-from .monitor import AutoWindowOcrResult, WindowMonitor
+from .monitor import AutoWindowOcrResult, WindowMonitor, diagnose_ocr_imports
 from .notifier import NotifyResult, send_notification
 from .rules import match_rules, parse_message
+from .single_instance import SingleInstance
 from .tray import TrayController
 from .wechat_window import WeChatWindowLocator
 
@@ -36,6 +37,18 @@ SUCCESS = "#059669"
 DANGER = "#DC2626"
 ICONS = ft.icons
 FONT_FAMILY = "Microsoft YaHei"
+_single_instance: SingleInstance | None = None
+WINDOW_ATTR_NAMES = {
+    "width": "windowWidth",
+    "height": "windowHeight",
+    "min_width": "windowMinWidth",
+    "min_height": "windowMinHeight",
+    "prevent_close": "windowPreventClose",
+    "always_on_top": "windowAlwaysOnTop",
+    "visible": "windowVisible",
+    "minimized": "windowMinimized",
+    "focused": "windowFocused",
+}
 
 
 def select_screen_region(
@@ -131,14 +144,18 @@ class FletAssistantApp:
         self.current_view = "rules"
         self.running = True
         self.exit_requested = False
+        self.closed = False
+        self.hard_exit_scheduled = False
+        self.frontend_watchdog_started = False
+        self.preview_alarm_active = False
         self.tray = TrayController(logger, lambda action: self.event_queue.put(("tray", action)))
 
         self._build_fields()
         self._build_page()
         self._refresh_dependency_status()
         self._apply_keep_awake()
-        if self.config.app.enable_tray:
-            self.tray.start()
+        self._apply_tray_config(update_page=True)
+        self._start_frontend_exit_watchdog()
         self.page.run_thread(self._pump_events)
 
     def _build_fields(self) -> None:
@@ -338,11 +355,11 @@ class FletAssistantApp:
         self.page.padding = 0
         self.page.theme_mode = ft.ThemeMode.LIGHT
         self.page.theme = ft.Theme(font_family=FONT_FAMILY, use_material3=True)
-        self.page.window_width = 1600
-        self.page.window_height = 900
-        self.page.window_min_width = 980
-        self.page.window_min_height = 680
-        self.page.window_prevent_close = bool(self.config.app.enable_tray)
+        self._set_window_state("width", 1600)
+        self._set_window_state("height", 900)
+        self._set_window_state("min_width", 980)
+        self._set_window_state("min_height", 680)
+        self._set_window_state("prevent_close", True)
 
         self.file_picker = ft.FilePicker(on_result=self._on_sound_selected)
         self.page.overlay.append(self.file_picker)
@@ -396,7 +413,7 @@ class FletAssistantApp:
             return
 
         try:
-            target_pid = os.getpid()
+            allowed_pids = self._app_window_pids()
             hwnds: list[int] = []
 
             def callback(hwnd, _extra):
@@ -407,7 +424,7 @@ class FletAssistantApp:
                 except Exception:
                     pid = 0
                 title = win32gui.GetWindowText(hwnd) or ""
-                if "微信强提醒助手" in title or (pid == target_pid and title):
+                if pid in allowed_pids and title:
                     hwnds.append(hwnd)
 
             for _attempt in range(20):
@@ -451,12 +468,23 @@ class FletAssistantApp:
                 expand=True,
                 controls=[
                     ft.Container(
-                        padding=ft.padding.only(left=10, top=4, bottom=18),
-                        content=ft.Column(
-                            spacing=2,
+                        padding=ft.padding.only(left=8, top=4, bottom=18),
+                        content=ft.Row(
+                            spacing=10,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             controls=[
-                                ft.Text("微信强提醒", size=20, weight=ft.FontWeight.BOLD, color="#FFFFFF"),
-                                ft.Text("Flet 桌面版", size=12, color="#94A3B8"),
+                                ft.Image(
+                                    src=str(APP_ICON_PNG),
+                                    width=32,
+                                    height=32,
+                                    fit=ft.ImageFit.CONTAIN,
+                                ),
+                                ft.Text(
+                                    "微信强提醒助手",
+                                    size=18,
+                                    weight=ft.FontWeight.BOLD,
+                                    color="#FFFFFF",
+                                ),
                             ],
                         ),
                     ),
@@ -1010,7 +1038,7 @@ class FletAssistantApp:
                                         self._button(
                                             "停止声音",
                                             ICONS.VOLUME_OFF,
-                                            lambda _=None: self.alarm.stop(),
+                                            self.stop_alarm_preview,
                                             bgcolor="#E5E7EB",
                                             color=TEXT,
                                         ),
@@ -1195,15 +1223,16 @@ class FletAssistantApp:
             import win32process  # noqa: F401
             import psutil  # noqa: F401
         except Exception:
+            self.logger.exception("窗口监控依赖检查失败")
             missing.append("窗口监控依赖")
         try:
             import PIL  # noqa: F401
         except Exception:
+            self.logger.exception("截图依赖检查失败")
             missing.append("截图依赖")
-        try:
-            import paddleocr  # noqa: F401
-        except Exception:
-            missing.append("OCR 依赖")
+        ocr_failures = diagnose_ocr_imports(self.logger)
+        if ocr_failures:
+            missing.append("OCR 依赖（详见日志）")
         if missing:
             self.dep_status.value = "缺少：" + "、".join(missing)
         else:
@@ -1276,6 +1305,7 @@ class FletAssistantApp:
         save_config(self.config)
         self._apply_keep_awake()
         self.logger.info("配置已保存")
+        self._apply_tray_config()
         if show_message:
             self._snack("配置已保存")
 
@@ -1456,8 +1486,13 @@ class FletAssistantApp:
         self._create_alert(message, result.reason)
 
     def test_alarm(self, _event=None) -> None:
+        self.preview_alarm_active = True
         self.alarm.start(self._selected_alarm_sound())
         self._snack("报警音已开始播放")
+
+    def stop_alarm_preview(self, _event=None) -> None:
+        self.preview_alarm_active = False
+        self.alarm.stop()
 
     def test_notification(self, _event=None) -> None:
         self.save_from_ui(show_message=False)
@@ -1497,10 +1532,12 @@ class FletAssistantApp:
         alert = Alert(message=message, trigger_reason=reason, escalation_minutes=self.config.app.escalation_minutes)
         self.current_alerts[alert.id] = alert
         self.logger.info("开始强提醒 alert=%s reason=%s", alert.id, reason)
+        self.preview_alarm_active = False
         self.alarm.start(self.config.app.alarm_sound)
         self._show_alert(alert)
 
     def _show_alert(self, alert: Alert) -> None:
+        self._bring_alert_window_to_front()
         elapsed = ft.Text("已提醒：00:00", size=13, color=MUTED)
         remaining = ft.Text("", size=13, color=MUTED)
 
@@ -1533,6 +1570,7 @@ class FletAssistantApp:
             self.current_alerts.clear()
             self.alarm.stop()
             close_dialog()
+            self._set_window_state("always_on_top", False)
             self.stop_monitoring(show_message=False)
             self.notify_status.value = "通知状态：已确认处理，提醒和监控已关闭"
             self.page.update()
@@ -1858,16 +1896,14 @@ class FletAssistantApp:
             except RuntimeError as exc:
                 if "Event loop is closed" in str(exc):
                     self.logger.warning("Flet event loop 已关闭，停止后台任务")
-                    self.running = False
-                    if self.monitor:
-                        self.monitor.stop()
-                    self.alarm.stop()
+                    self.close()
                     break
                 self.logger.exception("Flet event pump failed")
             except Exception:
                 self.logger.exception("Flet event pump failed")
 
     def _handle_tray_action(self, action: str) -> None:
+        self.logger.info("处理托盘动作：%s", action)
         if action == "show":
             self._show_main_window()
         elif action == "start":
@@ -1877,40 +1913,320 @@ class FletAssistantApp:
         elif action == "alarm":
             self.test_alarm()
         elif action == "exit":
-            self.exit_requested = True
-            self.close()
-            for method_name in ("window_close", "window_destroy"):
-                method = getattr(self.page, method_name, None)
+            self.request_exit()
+
+    def _show_main_window(self) -> None:
+        self.logger.info("正在恢复已有主界面")
+        for attr, value in (
+            ("visible", True),
+            ("minimized", False),
+            ("focused", True),
+        ):
+            self._set_window_state(attr, value)
+        self.page.update()
+        restored = self._restore_existing_window()
+        if not restored:
+            restored = self._window_to_front()
+        self.logger.info("恢复已有主界面完成 restored=%s", restored)
+
+    def _bring_alert_window_to_front(self) -> None:
+        self.logger.info("强提醒弹出，正在置顶主界面")
+        for attr, value in (
+            ("visible", True),
+            ("minimized", False),
+            ("always_on_top", True),
+            ("focused", True),
+        ):
+            self._set_window_state(attr, value)
+        try:
+            self.page.update()
+        except Exception:
+            self.logger.debug("强提醒置顶前刷新窗口失败", exc_info=True)
+        restored = self._restore_existing_window()
+        if not restored:
+            restored = self._window_to_front()
+        self.logger.info("强提醒主界面置顶完成 restored=%s", restored)
+
+    def on_window_event(self, event) -> None:
+        event_data = str(getattr(event, "data", "") or getattr(event, "type", "")).lower()
+        self.logger.info("收到窗口事件：%s", event_data)
+        if "close" not in event_data:
+            return
+        if self.exit_requested:
+            return
+        self.logger.info("窗口关闭请求触发完整退出")
+        self.request_exit()
+
+    def request_exit(self) -> None:
+        if self.exit_requested:
+            if not self.hard_exit_scheduled:
+                self._schedule_hard_exit(delay_seconds=0.2)
+            return
+        self.exit_requested = True
+        self._set_window_state("prevent_close", False)
+        self._set_window_state("always_on_top", False)
+        try:
+            self.page.update()
+        except Exception:
+            self.logger.debug("退出前同步窗口关闭状态失败", exc_info=True)
+        self.close()
+        close_delay = 0.2 if self._close_window() else 0.1
+        self._schedule_hard_exit(delay_seconds=close_delay)
+
+    def _apply_tray_config(self, update_page: bool = True) -> None:
+        enabled = bool(self.config.app.enable_tray)
+        self._set_window_state("prevent_close", False)
+        self._bind_window_event()
+        if enabled:
+            self.tray.start()
+        else:
+            self.tray.stop()
+        self.logger.info("托盘配置已应用 enabled=%s", enabled)
+        if update_page and self.running:
+            try:
+                self.page.update()
+            except RuntimeError as exc:
+                if "Event loop is closed" in str(exc):
+                    self.running = False
+                else:
+                    raise
+
+    def _page_window(self):
+        try:
+            return getattr(self.page, "window", None)
+        except Exception:
+            return None
+
+    def _set_window_state(self, name: str, value) -> bool:
+        window = self._page_window()
+        if window is not None:
+            try:
+                setattr(window, name, value)
+                return True
+            except Exception:
+                self.logger.debug("Flet window.%s 设置失败，尝试兼容路径", name, exc_info=True)
+        legacy_name = f"window_{name}"
+        try:
+            setattr(self.page, legacy_name, value)
+            return True
+        except Exception:
+            self.logger.debug("Flet page.%s 设置失败，尝试底层属性", legacy_name, exc_info=True)
+        attr_name = WINDOW_ATTR_NAMES.get(name)
+        set_attr = getattr(self.page, "_set_attr", None)
+        if attr_name and callable(set_attr):
+            try:
+                set_attr(attr_name, value)
+                return True
+            except Exception:
+                self.logger.debug("Flet window attr %s 设置失败", attr_name, exc_info=True)
+        return False
+
+    def _bind_window_event(self) -> bool:
+        window = self._page_window()
+        if window is not None:
+            try:
+                window.on_event = self.on_window_event
+                return True
+            except Exception:
+                self.logger.debug("Flet window.on_event 绑定失败，尝试兼容路径", exc_info=True)
+        add_event_handler = getattr(self.page, "_add_event_handler", None)
+        if callable(add_event_handler):
+            try:
+                add_event_handler("window_event", self.on_window_event)
+                return True
+            except Exception:
+                self.logger.debug("Flet window_event 兼容绑定失败", exc_info=True)
+        try:
+            self.page.on_window_event = self.on_window_event
+            return True
+        except Exception:
+            self.logger.warning("Flet 窗口关闭事件绑定失败，托盘隐藏关闭窗口可能不可用", exc_info=True)
+            return False
+
+    def _window_to_front(self) -> bool:
+        window = self._page_window()
+        if window is not None:
+            try:
+                window.to_front()
+                return True
+            except Exception:
+                self.logger.debug("Flet window.to_front 失败，尝试兼容路径", exc_info=True)
+        for method_name in ("window_to_front",):
+            method = getattr(self.page, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                    return True
+                except Exception:
+                    self.logger.debug("Flet %s 失败", method_name, exc_info=True)
+        invoke_method = getattr(self.page, "_invoke_method", None)
+        if callable(invoke_method):
+            try:
+                invoke_method("windowToFront")
+                return True
+            except Exception:
+                self.logger.debug("Flet windowToFront 底层调用失败", exc_info=True)
+        return False
+
+    def _app_window_pids(self) -> set[int]:
+        target_pid = os.getpid()
+        pids = {target_pid}
+        for child in self._flet_child_processes():
+            pids.add(child.pid)
+        return pids
+
+    def _flet_child_processes(self) -> list:
+        try:
+            import psutil
+
+            current_process = psutil.Process(os.getpid())
+            children = []
+            for child in current_process.children(recursive=True):
+                try:
+                    if child.name().lower() == "flet.exe":
+                        children.append(child)
+                except Exception:
+                    self.logger.debug("读取 Flet 子进程信息失败", exc_info=True)
+            return children
+        except Exception:
+            self.logger.debug("获取 Flet 子进程失败", exc_info=True)
+            return []
+
+    def _start_frontend_exit_watchdog(self) -> None:
+        if self.frontend_watchdog_started:
+            return
+        self.frontend_watchdog_started = True
+
+        def watch() -> None:
+            seen_frontend = False
+            missing_since: float | None = None
+            while self.running and not self.exit_requested:
+                has_frontend = bool(self._flet_child_processes())
+                if has_frontend:
+                    seen_frontend = True
+                    missing_since = None
+                elif seen_frontend:
+                    now = time.monotonic()
+                    if missing_since is None:
+                        missing_since = now
+                    elif now - missing_since >= 0.5:
+                        self.logger.warning("Flet 前端进程已退出，执行完整退出")
+                        self.request_exit()
+                        break
+                time.sleep(0.25)
+
+        threading.Thread(target=watch, name="wechat-alert-flet-watchdog", daemon=True).start()
+
+    def _restore_existing_window(self) -> bool:
+        try:
+            import win32con
+            import win32gui
+            import win32process
+        except Exception as exc:  # noqa: BLE001
+            self.logger.info("原生恢复窗口跳过，缺少 pywin32：%s", exc)
+            return False
+
+        allowed_pids = self._app_window_pids()
+        candidates: list[tuple[int, str]] = []
+
+        def callback(hwnd, _extra):
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return
+            if pid not in allowed_pids:
+                return
+            title = win32gui.GetWindowText(hwnd) or ""
+            if title:
+                candidates.append((hwnd, title))
+
+        try:
+            win32gui.EnumWindows(callback, None)
+            if not candidates:
+                self.logger.warning("未找到可恢复的主界面窗口 allowed_pids=%s", sorted(allowed_pids))
+                return False
+            hwnd, title = candidates[0]
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                self.logger.debug("SetForegroundWindow 失败 hwnd=%s title=%s", hwnd, title, exc_info=True)
+            self.logger.info("已恢复已有主界面 hwnd=%s title=%s", hwnd, title)
+            return True
+        except Exception:
+            self.logger.exception("原生恢复已有主界面失败")
+            return False
+
+    def _close_window(self) -> bool:
+        window = self._page_window()
+        if window is not None:
+            for method_name in ("destroy", "close"):
+                method = getattr(window, method_name, None)
                 if callable(method):
                     try:
                         method()
-                        break
+                        return True
                     except Exception:
-                        continue
+                        self.logger.debug("Flet window.%s 失败，尝试兼容路径", method_name, exc_info=True)
+        for method_name in ("window_destroy", "window_close"):
+            method = getattr(self.page, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                    return True
+                except Exception:
+                    self.logger.debug("Flet page.%s 失败", method_name, exc_info=True)
+        set_attr = getattr(self.page, "_set_attr", None)
+        if callable(set_attr):
+            for attr_name in ("windowDestroy", "windowClose"):
+                try:
+                    set_attr(attr_name, str(time.time()))
+                    self.page.update()
+                    return True
+                except Exception:
+                    self.logger.debug("Flet %s 底层关闭调用失败", attr_name, exc_info=True)
+        return False
 
-    def _show_main_window(self) -> None:
-        for attr, value in (
-            ("window_visible", True),
-            ("window_minimized", False),
-            ("window_focused", True),
-        ):
+    def _schedule_hard_exit(self, delay_seconds: float = 2.0) -> None:
+        if self.hard_exit_scheduled:
+            return
+        self.hard_exit_scheduled = True
+
+        def hard_exit() -> None:
             try:
-                setattr(self.page, attr, value)
+                self._terminate_flet_children()
+                self.logger.warning("Flet 窗口未在预期时间内退出，执行进程级退出")
             except Exception:
                 pass
-        try:
-            self.page.window_to_front()
-        except Exception:
-            pass
-        self.page.update()
+            os._exit(0)
 
-    def on_window_event(self, event) -> None:
-        if getattr(event, "data", "") == "close" and not self.exit_requested:
-            self.page.window_visible = False
-            self.page.update()
+        timer = threading.Timer(delay_seconds, hard_exit)
+        timer.daemon = True
+        timer.start()
+
+    def _terminate_flet_children(self) -> None:
+        children = self._flet_child_processes()
+        if not children:
             return
-        if getattr(event, "data", "") == "close":
-            self.close()
+        try:
+            import psutil
+
+            for child in children:
+                try:
+                    self.logger.info("正在关闭 Flet 子进程 pid=%s", child.pid)
+                    child.terminate()
+                except Exception:
+                    self.logger.debug("关闭 Flet 子进程失败", exc_info=True)
+            _gone, alive = psutil.wait_procs(children, timeout=1)
+            for child in alive:
+                try:
+                    self.logger.warning("Flet 子进程未正常退出，强制结束 pid=%s", child.pid)
+                    child.kill()
+                except Exception:
+                    self.logger.debug("强制结束 Flet 子进程失败", exc_info=True)
+        except Exception:
+            self.logger.debug("清理 Flet 子进程失败", exc_info=True)
 
     def _snack(self, message: str, color: str = PRIMARY) -> None:
         self.page.snack_bar = ft.SnackBar(
@@ -2020,12 +2336,17 @@ class FletAssistantApp:
             return default
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         self.running = False
+        self._set_window_state("always_on_top", False)
         if self.monitor:
             self.monitor.stop()
         self.alarm.stop()
         self.keepalive.stop()
         self.tray.stop()
+        self._terminate_flet_children()
         self.logger.info("软件退出")
 
 
@@ -2034,13 +2355,27 @@ def main(page: ft.Page) -> None:
     try:
         config = load_config()
         app = FletAssistantApp(page, config, logger)
-        if config.app.enable_tray:
-            page.on_window_event = app.on_window_event
-        page.on_close = lambda _event: app.close()
+        if _single_instance:
+            _single_instance.start_show_listener(
+                lambda: app.event_queue.put(("tray", "show")),
+                logger,
+            )
+        app._bind_window_event()
+        page.on_close = lambda _event: app.request_exit()
     except Exception:
         logger.exception("Flet 主界面初始化失败")
         raise
 
 
 def run() -> None:
-    ft.app(target=main)
+    global _single_instance
+    instance = SingleInstance()
+    if not instance.acquire():
+        instance.signal_existing()
+        return
+    _single_instance = instance
+    try:
+        ft.app(target=main)
+    finally:
+        instance.close()
+        _single_instance = None

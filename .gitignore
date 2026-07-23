@@ -11,6 +11,8 @@ screenshots_debug/
 .coverage
 dist/
 build/
+installer/*.exe
+installer/*.DDF
 
 # Unrelated presentation workspace kept beside this project.
 新建文件夹/

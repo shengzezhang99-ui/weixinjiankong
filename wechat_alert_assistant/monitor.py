@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import logging
+import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -20,8 +23,6 @@ from .wechat_window import WeChatWindow, WeChatWindowLocator
 
 
 try:
-    import os
-
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     import win32gui
     import win32process
@@ -33,6 +34,36 @@ try:
     import psutil
 except Exception:  # noqa: BLE001
     psutil = None
+
+
+def diagnose_ocr_imports(logger: logging.Logger | None = None) -> list[str]:
+    """Return OCR import failures while logging the full exception details."""
+    failures: list[str] = []
+    checks = [
+        ("paddle", "paddle"),
+        ("paddleocr", "paddleocr"),
+    ]
+    for label, module_name in checks:
+        try:
+            module = importlib.import_module(module_name)
+            module_file = getattr(module, "__file__", "")
+            version = getattr(module, "__version__", "")
+            if logger:
+                logger.info("OCR import ok: %s version=%s file=%s", label, version, module_file)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{label}: {type(exc).__name__}: {exc}")
+            if logger:
+                logger.exception("OCR import failed: %s", label)
+    try:
+        from paddleocr import PaddleOCR  # noqa: F401
+
+        if logger:
+            logger.info("OCR import ok: from paddleocr import PaddleOCR")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"PaddleOCR: {type(exc).__name__}: {exc}")
+        if logger:
+            logger.exception("OCR import failed: from paddleocr import PaddleOCR")
+    return failures
 
 
 @dataclass(slots=True)
@@ -76,16 +107,31 @@ class OcrEngine:
         self.logger = logger
         self._ocr = None
         self._available = None
+        self.last_error = ""
 
     @property
     def available(self) -> bool:
         if self._available is None:
+            self.last_error = ""
             try:
+                import_failures = diagnose_ocr_imports(self.logger)
+                if import_failures:
+                    self.last_error = "；".join(import_failures)
+                    self._available = False
+                    return False
+
                 from paddleocr import PaddleOCR
 
-                model_dirs = resolve_ocr_model_dirs()
+                model_dirs = resolve_ocr_model_dirs(self.logger)
                 if model_dirs:
                     self.logger.info("PaddleOCR using bundled models: %s", model_dirs)
+                self.logger.info(
+                    "PaddleOCR initializing frozen=%s meipass=%s cwd=%s executable=%s",
+                    bool(getattr(sys, "frozen", False)),
+                    getattr(sys, "_MEIPASS", ""),
+                    os.getcwd(),
+                    sys.executable,
+                )
                 self._ocr = PaddleOCR(
                     use_angle_cls=True,
                     lang="ch",
@@ -94,15 +140,24 @@ class OcrEngine:
                     **model_dirs,
                 )
                 self._available = True
+                self.logger.info("PaddleOCR initialized successfully")
             except Exception as exc:  # noqa: BLE001
-                self.logger.warning("PaddleOCR 不可用：%s", exc)
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.logger.exception("PaddleOCR 初始化失败")
                 self._available = False
         return bool(self._available)
 
     def recognize(self, image_path: Path) -> str:
         if not self.available or self._ocr is None:
+            if self.last_error:
+                self.logger.warning("OCR skipped because engine is unavailable: %s", self.last_error)
             return ""
-        result = self._ocr.ocr(str(image_path), cls=True)
+        try:
+            result = self._ocr.ocr(str(image_path), cls=True)
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.logger.exception("PaddleOCR 识别失败 image=%s", image_path)
+            return ""
         lines: list[str] = []
         for block in result or []:
             for item in block or []:
@@ -192,6 +247,14 @@ class WindowMonitor:
             modes.append("弹窗 OCR")
         return "、".join(modes)
 
+    def _ocr_empty_message(self) -> str:
+        if not self.ocr.last_error:
+            return "OCR 没有识别到文字"
+        detail = self.ocr.last_error
+        if len(detail) > 180:
+            detail = detail[:177] + "..."
+        return f"OCR 不可用或识别失败：{detail}（详见日志）"
+
     @staticmethod
     def is_supported() -> bool:
         return bool(win32gui and win32process and psutil)
@@ -241,6 +304,7 @@ class WindowMonitor:
         if self.config.app.log_ocr_text:
             self.logger.info("OCR结果 hwnd=%s text=%s", window.hwnd, raw_text)
         if not raw_text:
+            self.logger.warning("弹窗 OCR 未返回文本：%s", self._ocr_empty_message())
             return
         key = self._text_key("popup", raw_text)
         now = datetime.now()
@@ -286,6 +350,8 @@ class WindowMonitor:
         if self.config.app.log_ocr_text:
             self.logger.info("区域OCR结果 text=%s", raw_text)
         if not raw_text:
+            self.on_status(self._ocr_empty_message())
+            self.logger.warning("区域 OCR 未返回文本：%s", self._ocr_empty_message())
             return
 
         current = datetime.now()
@@ -361,7 +427,9 @@ class WindowMonitor:
                 raw_text,
             )
         if not raw_text:
-            return AutoWindowOcrResult(False, "OCR 没有识别到文字", window=window, bbox=bbox, image_path=image_path)
+            message = self._ocr_empty_message()
+            self.logger.warning("自动窗口 OCR 未返回文本：%s", message)
+            return AutoWindowOcrResult(False, message, window=window, bbox=bbox, image_path=image_path)
 
         current = datetime.now()
         normalized_text = normalize_text(raw_text)

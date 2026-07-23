@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ ALARM_AUDIO_PRESETS: dict[str, tuple[str, Path]] = {
     "preset:reflection": ("倒影", PROJECT_ROOT / "audio" / "苹果倒影-原版-Reflection.mp3"),
     "preset:surge": ("风暴", PROJECT_ROOT / "audio" / "苹果倒影-风暴-Surge.mp3"),
     "preset:dreamer": ("梦想家", PROJECT_ROOT / "audio" / "苹果倒影-梦想家-Dreamer.mp3"),
+    "preset:huawei": ("HUAWEI", PROJECT_ROOT / "audio" / "HUAWEI TUNE HARMONY.mp3"),
 }
 
 APP_ICON_PNG = PROJECT_ROOT / "icon" / "5ttetm0toqg3foaw3josy874pajeqyi.png"
@@ -57,14 +59,21 @@ def _ascii_cache_root() -> Path | None:
     return None
 
 
-def resolve_ocr_model_dirs() -> dict[str, str]:
-    if not all(_complete_model_dir(path) for path in OCR_MODEL_DIRS.values()):
+def resolve_ocr_model_dirs(logger: logging.Logger | None = None) -> dict[str, str]:
+    missing = [str(path) for path in OCR_MODEL_DIRS.values() if not _complete_model_dir(path)]
+    if missing:
+        if logger:
+            logger.warning("PaddleOCR bundled model directories incomplete or missing: %s", missing)
         return {}
     if _is_ascii_path(OCR_MODELS_ROOT):
+        if logger:
+            logger.info("PaddleOCR bundled model root is ASCII-safe: %s", OCR_MODELS_ROOT)
         return {key: str(path) for key, path in OCR_MODEL_DIRS.items()}
 
     cache_root = _ascii_cache_root()
     if cache_root is None:
+        if logger:
+            logger.warning("PaddleOCR bundled model root is non-ASCII and no ASCII cache root is available: %s", OCR_MODELS_ROOT)
         return {}
 
     cache_models_root = cache_root / "paddleocr_models"
@@ -73,20 +82,32 @@ def resolve_ocr_model_dirs() -> dict[str, str]:
         "rec_model_dir": cache_models_root / "rec" / "ch" / "ch_PP-OCRv4_rec_infer",
         "cls_model_dir": cache_models_root / "cls" / "ch_ppocr_mobile_v2.0_cls_infer",
     }
+    if logger:
+        logger.info("PaddleOCR copying bundled models from %s to ASCII cache %s", OCR_MODELS_ROOT, cache_models_root)
     try:
         for key, source in OCR_MODEL_DIRS.items():
             target = cache_dirs[key]
             if _complete_model_dir(target):
+                if logger:
+                    logger.info("PaddleOCR cached model already exists: %s", target)
                 continue
             if target.exists():
                 shutil.rmtree(target)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(source, target)
+            if logger:
+                logger.info("PaddleOCR copied model directory: %s -> %s", source, target)
     except Exception:
+        if logger:
+            logger.exception("PaddleOCR failed to copy bundled models into ASCII cache")
         return {}
 
     if not all(_complete_model_dir(path) for path in cache_dirs.values()):
+        if logger:
+            logger.warning("PaddleOCR cached model directories incomplete after copy: %s", cache_dirs)
         return {}
+    if logger:
+        logger.info("PaddleOCR using ASCII cached models: %s", cache_dirs)
     return {key: str(path) for key, path in cache_dirs.items()}
 
 

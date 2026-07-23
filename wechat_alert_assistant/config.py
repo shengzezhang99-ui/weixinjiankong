@@ -132,7 +132,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         config = Config()
         save_config(config, path)
         return config
-    with path.open("r", encoding="utf-8") as fp:
+    with path.open("r", encoding="utf-8-sig") as fp:
         return config_from_dict(json.load(fp))
 
 

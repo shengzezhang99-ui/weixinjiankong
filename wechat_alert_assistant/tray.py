@@ -13,10 +13,12 @@ class TrayController:
         self.dispatch = dispatch
         self._icon = None
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
         try:
             import pystray
             from PIL import Image
@@ -25,14 +27,22 @@ class TrayController:
             return
 
         if APP_ICON_PNG.exists():
-            image = Image.open(APP_ICON_PNG).convert("RGBA").resize((64, 64))
+            with Image.open(APP_ICON_PNG) as source:
+                image = source.convert("RGBA").resize((64, 64))
         else:
             image = Image.new("RGB", (64, 64), "#2563EB")
 
         def item(action: str):
-            return lambda _icon, _item: self.dispatch(action)
+            def handle(_icon, _item) -> None:
+                try:
+                    self.logger.info("托盘菜单点击：%s", action)
+                    self.dispatch(action)
+                except Exception:
+                    self.logger.exception("托盘菜单分发失败：%s", action)
 
-        self._icon = pystray.Icon(
+            return handle
+
+        icon = pystray.Icon(
             "wechat_alert_assistant",
             image,
             "微信强提醒助手",
@@ -44,20 +54,34 @@ class TrayController:
                 pystray.MenuItem("退出", item("exit")),
             ),
         )
-        self._thread = threading.Thread(target=self._run_icon, daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run_icon, args=(icon,), name="wechat-alert-tray", daemon=True)
+        with self._lock:
+            self._icon = icon
+            self._thread = thread
+        thread.start()
         self.logger.info("托盘图标已启动")
 
-    def _run_icon(self) -> None:
+    def _run_icon(self, icon) -> None:
         try:
-            self._icon.run()
+            icon.run()
         except Exception:
             self.logger.exception("托盘图标运行异常")
+        finally:
+            with self._lock:
+                if self._icon is icon:
+                    self._icon = None
+                    self._thread = None
 
     def stop(self) -> None:
-        if self._icon:
+        with self._lock:
+            icon = self._icon
+            thread = self._thread
+            self._icon = None
+            self._thread = None
+        if icon:
             try:
-                self._icon.stop()
+                icon.stop()
             except Exception:
                 self.logger.debug("停止托盘图标失败", exc_info=True)
-        self._icon = None
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)

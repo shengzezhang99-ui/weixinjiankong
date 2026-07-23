@@ -15,7 +15,7 @@ from .alarm import AlarmPlayer
 from .config import Config, load_config, save_config
 from .logging_setup import setup_logging
 from .models import Alert, Message
-from .monitor import WindowMonitor
+from .monitor import WindowMonitor, diagnose_ocr_imports
 from .notifier import send_notification
 from .rules import match_rules, parse_message
 
@@ -617,15 +617,16 @@ class MainWindow(ctk.CTk):
             import win32process  # noqa: F401
             import psutil  # noqa: F401
         except Exception:
+            self.logger.exception("窗口监控依赖检查失败")
             missing.append("真实窗口监控需要 pywin32、psutil")
         try:
             import PIL  # noqa: F401
         except Exception:
+            self.logger.exception("截图依赖检查失败")
             missing.append("截图预处理需要 Pillow")
-        try:
-            import paddleocr  # noqa: F401
-        except Exception:
-            missing.append("OCR 需要 paddleocr")
+        ocr_failures = diagnose_ocr_imports(self.logger)
+        if ocr_failures:
+            missing.append("OCR 需要 paddleocr（详见日志）")
         if missing:
             self.dep_status_var.set("当前为可演示模式：" + "；".join(missing))
         else:

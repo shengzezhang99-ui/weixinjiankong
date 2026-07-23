@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from wechat_alert_assistant.config import config_from_dict
+from wechat_alert_assistant.config import config_from_dict, load_config
 
 
 class ConfigCompatibilityTests(unittest.TestCase):
@@ -33,6 +35,15 @@ class ConfigCompatibilityTests(unittest.TestCase):
         config = config_from_dict({"app": {"alarm_sound": "preset:removed"}})
 
         self.assertEqual("preset:reflection", config.app.alarm_sound)
+
+    def test_utf8_bom_config_file_can_be_loaded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.json"
+            path.write_text('{"app": {"enable_tray": true}}', encoding="utf-8-sig")
+
+            config = load_config(path)
+
+        self.assertTrue(config.app.enable_tray)
 
 
 if __name__ == "__main__":
